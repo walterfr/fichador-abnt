@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fichador ABNT - Prof. Walter Rebouças</title>
+    
+    <!-- MUDANÇA ESTRATÉGICA: Todas as bibliotecas agora vêm do Cloudflare (cdnjs), que é 100% compatível com o GitHub Pages -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.6/babel.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Motor do Leitor de PDF e HTML2PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
+
+    <style>
+        .custom-scroll::-webkit-scrollbar { width: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        input[type=number]::-webkit-inner-spin-button, 
+        input[type=number]::-webkit-outer-spin-button { 
+            -webkit-appearance: none; 
+            margin: 0; 
+        }
+        input[type=number] { -moz-appearance: textfield; }
+
+        #fichador-app-root {
+            min-height: 100vh;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-0 m-0 flex h-screen w-screen overflow-hidden">
+
+    <!-- ÁREA DE DIAGNÓSTICO: Se algo falhar, o erro aparecerá aqui -->
+    <div id="error-log" style="position: absolute; top: 0; left: 0; z-index: 9999; background: #fee2e2; color: #991b1b; width: 100%; font-family: monospace; display: none; padding: 10px; border-bottom: 2px solid #ef4444;">
+        <strong>Erro detetado (Por favor, copie isto para o assistente):</strong><br>
+    </div>
+
+    <script>
+        // Capturador de erros do navegador
+        window.onerror = function(message, source, lineno, colno, error) {
+            var log = document.getElementById('error-log');
+            log.style.display = 'block';
+            log.innerHTML += `<p>- ${message} (Linha: ${lineno})</p>`;
+        };
+    </script>
+
+    <div id="fichador-app-root">
+        <!-- Mensagem inicial de carregamento nativo para garantir que a tela não fica totalmente em branco -->
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; color: #4338ca;">
+            <h2>A carregar o Fichador do PPGHCE...</h2>
+            <p style="font-size: 12px; color: #6b7280;">A sincronizar bibliotecas (isto pode demorar alguns segundos no primeiro acesso)</p>
+        </div>
+    </div>
+
+    <!-- CÓDIGO DA APLICAÇÃO -->
+    <script type="text/babel" data-presets="react,env">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [pdfjsLoaded, setPdfjsLoaded] = useState(false);
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [pdfPages, setPdfPages] = useState([]);
+            const [highlights, setHighlights] = useState([]);
+            const [fileName, setFileName] = useState('');
+            const [isExportingPDF, setIsExportingPDF] = useState(false);
+            
+            const [currentPage, setCurrentPage] = useState(1);
+            const [pageInputValue, setPageInputValue] = useState('1'); 
+            
+            const [metadata, setMetadata] = useState({
+                docType: 'livro', 
+                authorLastName: 'SANTOS',
+                authorFirstName: 'Milton',
+                title: 'A Natureza do Espaço',
+                subtitle: 'Técnica e Tempo, Razão e Emoção',
+                edition: '4',
+                city: 'São Paulo',
+                publisher: 'Edusp',
+                year: '2004',
+                journal: '',
+                volume: '',
+                pages: '',
+                url: '',
+                accessDate: ''
+            });
+
+            // Configuração do PDF.js otimizada para o Cloudflare CDN
+            useEffect(() => {
+                let attempts = 0;
+                const initPdfWorker = () => {
+                    if (window.pdfjsLib) {
+                        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                        setPdfjsLoaded(true);
+                    } else if (attempts < 20) {
+                        attempts++;
+                        setTimeout(initPdfWorker, 500);
+                    } else {
+                        throw new Error("Falha ao carregar a biblioteca PDF.js a partir do servidor cdnjs.");
+                    }
+                };
+                initPdfWorker();
+            }, []);
+
+            useEffect(() => {
+                if (pdfPages.length === 0) return;
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const newPage = Number(entry.target.dataset.page);
+                            setCurrentPage(newPage);
+                            setPageInputValue(newPage.toString()); 
+                        }
+                    });
+                }, { threshold: 0.3 });
+
+                document.querySelectorAll('.pdf-page-container').forEach(page => observer.observe(page));
+                return () => observer.disconnect();
+            }, [pdfPages]);
+
+            const handleFileUpload = async (event) => {
+                const file = event.target.files[0];
+                if (!file || !window.pdfjsLib) return;
+
+                setFileName(file.name);
+                setIsProcessing(true);
+                setPdfPages([]);
+                setCurrentPage(1);
+                setPageInputValue('1');
+
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const pdf = await window.pdfjsLib.getDocument(arrayBuffer).promise;
+                    let extractedText = [];
+                    const maxPages = Math.min(pdf.numPages, 100); 
+                    
+                    for (let i = 1; i <= maxPages; i++) {
+                        const page = await pdf.getPage(i);
+                        const textContent = await page.getTextContent();
+                        const pageText = textContent.items.map(item => item.str).join(' ');
+                        extractedText.push({ pageNumber: i, text: pageText });
+                    }
+                    setPdfPages(extractedText);
+                    if(pdf.numPages > 100) alert("Para garantir estabilidade, foram processadas apenas as primeiras 100 páginas.");
+                } catch (error) {
+                    console.error("Erro ao ler PDF:", error);
+                    alert("Ocorreu um erro ao ler o PDF. Certifique-se de que é um ficheiro de texto válido e sem palavra-passe.");
+                } finally {
+                    setIsProcessing(false);
+                }
+            };
+
+            const handleMetadataChange = (e) => {
+                const { name, value } = e.target;
+                setMetadata(prev => ({ ...prev, [name]: value }));
+            };
+
+            const captureHighlight = () => {
+                const selection = window.getSelection();
+                const selectedText = selection.toString().trim();
+                if (!selectedText) return;
+
+                let node = selection.anchorNode;
+                let pageNum = currentPage; 
+                
+                while (node && node.parentElement) {
+                    if (node.parentElement.dataset.page) {
+                        pageNum = node.parentElement.dataset.page;
+                        break;
+                    }
+                    node = node.parentElement;
+                }
+
+                setHighlights(prev => [...prev, { id: Date.now(), text: selectedText, page: pageNum }]);
+                selection.removeAllRanges(); 
+            };
+
+            const handleSliderChange = (e) => {
+                const newPage = parseInt(e.target.value);
+                setCurrentPage(newPage);
+                setPageInputValue(newPage.toString());
+                const pageElement = document.getElementById(`pdf-page-${newPage}`);
+                if (pageElement) pageElement.scrollIntoView({ behavior: 'smooth' });
+            };
+
+            const handlePageInputChange = (e) => setPageInputValue(e.target.value);
+
+            const submitPageInput = () => {
+                let page = parseInt(pageInputValue);
+                if (isNaN(page)) {
+                    setPageInputValue(currentPage.toString());
+                    return;
+                }
+                if (page < 1) page = 1;
+                if (page > pdfPages.length) page = pdfPages.length;
+                
+                setCurrentPage(page);
+                setPageInputValue(page.toString());
+                
+                const pageElement = document.getElementById(`pdf-page-${page}`);
+                if (pageElement) pageElement.scrollIntoView({ behavior: 'smooth' });
+            };
+
+            const handlePageInputKeyDown = (e) => { if (e.key === 'Enter') submitPageInput(); };
+
+            const getReferenceData = () => {
+                const { docType, authorLastName, authorFirstName, title, subtitle, edition, city, publisher, year, journal, volume, pages, url, accessDate } = metadata;
+                const lastNameFullRef = authorLastName.toUpperCase();
+                const lastNameInText = authorLastName.charAt(0).toUpperCase() + authorLastName.slice(1).toLowerCase();
+                
+                let refText = "", refHTML = "", refMD = "";
+
+                if (docType === 'livro') {
+                    refText = `${lastNameFullRef}, ${authorFirstName}. ${title}${subtitle ? `: ${subtitle}` : ''}. ${edition ? `${edition}. ed. ` : ''}${city}: ${publisher}, ${year}.`;
+                    refMD = `${lastNameFullRef}, ${authorFirstName}. **${title}**${subtitle ? `: ${subtitle}` : ''}. ${edition ? `${edition}. ed. ` : ''}${city}: ${publisher}, ${year}.`;
+                    refHTML = `${lastNameFullRef}, ${authorFirstName}. <strong>${title}</strong>${subtitle ? `: ${subtitle}` : ''}. ${edition ? `${edition}. ed. ` : ''}${city}: ${publisher}, ${year}.`;
+                } else if (docType === 'artigo') {
+                    refText = `${lastNameFullRef}, ${authorFirstName}. ${title}${subtitle ? `: ${subtitle}` : ''}. ${journal}, ${city}, ${volume ? `v. ${volume}, ` : ''}${pages ? `p. ${pages}, ` : ''}${year}.`;
+                    refMD = `${lastNameFullRef}, ${authorFirstName}. ${title}${subtitle ? `: ${subtitle}` : ''}. **${journal}**, ${city}, ${volume ? `v. ${volume}, ` : ''}${pages ? `p. ${pages}, ` : ''}${year}.`;
+                    refHTML = `${lastNameFullRef}, ${authorFirstName}. ${title}${subtitle ? `: ${subtitle}` : ''}. <strong>${journal}</strong>, ${city}, ${volume ? `v. ${volume}, ` : ''}${pages ? `p. ${pages}, ` : ''}${year}.`;
+                } else if (docType === 'site') {
+                    refText = `${lastNameFullRef}, ${authorFirstName}. ${title}. Disponível em: <${url}>. Acesso em: ${accessDate}.`;
+                    refMD = `${lastNameFullRef}, ${authorFirstName}. **${title}**. Disponível em: <${url}>. Acesso em: ${accessDate}.`;
+                    refHTML = `${lastNameFullRef}, ${authorFirstName}. <strong>${title}</strong>. Disponível em: &lt;${url}&gt;. Acesso em: ${accessDate}.`;
+                }
+                return { refText, refMD, refHTML, lastNameInText, year };
+            };
+
+            const downloadMD = () => {
+                const { refMD, lastNameInText, year } = getReferenceData();
+                let md = `# Fichamento: ${metadata.title}\n\n## Referência Completa\n${refMD}\n\n## Destaques e Citações\n\n`;
+                if (highlights.length === 0) md += `*Nenhum destaque capturado.*`;
+                highlights.forEach(h => {
+                    const citacaoPage = (metadata.docType === 'site' && !h.page) ? '' : `, p. ${h.page}`;
+                    md += `> "${h.text}"\n>\n> -- (${lastNameInText}, ${year}${citacaoPage})\n\n`;
+                });
+                const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url; link.download = `fichamento_${metadata.authorLastName.toLowerCase()}.md`;
+                link.click();
+            };
+
+            const downloadTXT = () => {
+                const { refText, lastNameInText, year } = getReferenceData();
+                let txt = `FICHAMENTO: ${metadata.title.toUpperCase()}\n====================================================\n\n`;
+                txt += `REFERÊNCIA COMPLETA:\n${refText}\n\n----------------------------------------------------\nCITAÇÕES DIRETAS:\n\n`;
+                if (highlights.length === 0) txt += `Nenhum destaque capturado.\n`;
+                highlights.forEach(h => {
+                    const citacaoPage = (metadata.docType === 'site' && !h.page) ? '' : `, p. ${h.page}`;
+                    txt += `"${h.text}"\n(${lastNameInText}, ${year}${citacaoPage})\n\n`;
+                });
+                const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url; link.download = `fichamento_${metadata.authorLastName.toLowerCase()}.txt`;
+                link.click();
+            };
+
+            const downloadPDF = () => {
+                setIsExportingPDF(true);
+                const { refHTML, lastNameInText, year } = getReferenceData();
+                let htmlContent = `
+                    <div style="font-family: Arial, sans-serif; font-size: 12pt; line-height: 1.5; color: #000; padding: 20px; text-align: justify;">
+                        <h1 style="font-size: 14pt; font-weight: bold; text-align: center; margin-bottom: 30px; text-transform: uppercase;">Fichamento: ${metadata.title}</h1>
+                        <p style="margin-bottom: 20px;"><strong>REFERÊNCIA BIBLIOGRÁFICA</strong><br/>${refHTML}</p>
+                        <div style="margin-bottom: 20px; border-bottom: 1px solid #ccc;"></div>
+                        <p style="margin-bottom: 15px;"><strong>DESTAQUES E CITAÇÕES DIRETAS</strong></p>
+                `;
+                if (highlights.length === 0) {
+                    htmlContent += `<p>Nenhum destaque capturado até o momento.</p>`;
+                } else {
+                    highlights.forEach(h => {
+                        const citacaoPage = (metadata.docType === 'site' && !h.page) ? '' : `, p. ${h.page}`;
+                        htmlContent += `<div style="margin-bottom: 20px; padding-left: 4cm;"><p style="font-size: 10pt; line-height: 1.2;">"${h.text}" (${lastNameInText}, ${year}${citacaoPage})</p></div>`;
+                    });
+                }
+                htmlContent += `</div>`;
+                const opt = {
+                    margin: [1, 1, 1, 1],
+                    filename: `fichamento_${metadata.authorLastName.toLowerCase()}.pdf`,
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { scale: 2, useCORS: true },
+                    jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' }
+                };
+                window.html2pdf().set(opt).from(htmlContent).save().then(() => setIsExportingPDF(false));
+            };
+
+            const getMarkdownPreview = () => {
+                const { refMD, lastNameInText, year } = getReferenceData();
+                let md = `# Fichamento: ${metadata.title}\n\n## Referência Completa\n${refMD}\n\n## Destaques\n\n`;
+                if (highlights.length === 0) md += `*Nenhum destaque capturado até o momento.*`;
+                highlights.forEach(h => {
+                    const citacaoPage = (metadata.docType === 'site' && !h.page) ? '' : `, p. ${h.page}`;
+                    md += `> "${h.text}"\n>\n> -- (${lastNameInText}, ${year}${citacaoPage})\n\n`;
+                });
+                return md;
+            };
+
+            // Ecrã de loading atualizado
+            if (!pdfjsLoaded) {
+                return (
+                    <div className="flex flex-col items-center justify-center h-full w-full bg-white text-indigo-800 p-10">
+                        <i className="fas fa-spinner fa-spin text-4xl mb-4"></i>
+                        <p className="font-semibold">Inicializando Fichador do PPGHCE...</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="flex flex-col h-full w-full bg-gray-50 font-sans text-left overflow-hidden">
+                    <header className="bg-indigo-900 text-white p-3 flex justify-between items-center shadow-md z-30 shrink-0">
+                        <h1 className="text-lg font-bold flex items-center"><i className="fas fa-book-open mr-3"></i> Fichador Acadêmico</h1>
+                        <span className="text-[10px] font-bold text-indigo-200 bg-indigo-800 px-3 py-1 rounded-full border border-indigo-700 tracking-wider">Professor Walter Rebouças - @prof.walterfr</span>
+                    </header>
+
+                    <div className="flex flex-1 overflow-hidden flex-col md:flex-row h-full">
+                        
+                        {/* PAINEL ESQUERDO: Metadados */}
+                        <div className="w-full md:w-2/5 bg-white border-r border-gray-200 flex flex-col h-full shrink-0">
+                            
+                            <div className="flex-1 overflow-y-auto p-5 custom-scroll">
+                                <div className="mb-4">
+                                    <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Tipo de Documento (NBR 6023)</label>
+                                    <select name="docType" value={metadata.docType} onChange={handleMetadataChange} className="w-full border border-gray-300 bg-gray-50 rounded p-2 text-sm text-gray-800 focus:ring-2 focus:ring-indigo-500 outline-none">
+                                        <option value="livro">Livro / Monografia / Tese</option>
+                                        <option value="artigo">Artigo de Revista / Periódico</option>
+                                        <option value="site">Documento Eletrônico (Site/Internet)</option>
+                                    </select>
+                                </div>
+
+                                <div className="space-y-3 mb-6 bg-gray-50 p-4 rounded-lg border border-gray-100">
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Sobrenome</label><input type="text" name="authorLastName" value={metadata.authorLastName} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                        <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Nome(s)</label><input type="text" name="authorFirstName" value={metadata.authorFirstName} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                    </div>
+                                    <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Título da Obra</label><input type="text" name="title" value={metadata.title} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm font-medium" /></div>
+
+                                    {metadata.docType !== 'site' && (
+                                        <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Subtítulo (Opcional)</label><input type="text" name="subtitle" value={metadata.subtitle} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                    )}
+
+                                    {metadata.docType === 'livro' && (
+                                        <>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                <div className="col-span-1"><label className="text-[10px] font-semibold text-gray-500 uppercase">Edição</label><input type="text" name="edition" value={metadata.edition} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                                <div className="col-span-2"><label className="text-[10px] font-semibold text-gray-500 uppercase">Cidade</label><input type="text" name="city" value={metadata.city} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Editora</label><input type="text" name="publisher" value={metadata.publisher} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Ano</label><input type="text" name="year" value={metadata.year} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {metadata.docType === 'artigo' && (
+                                        <>
+                                            <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Revista/Periódico</label><input type="text" name="journal" value={metadata.journal} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Local</label><input type="text" name="city" value={metadata.city} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Ano</label><input type="text" name="year" value={metadata.year} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Vol / Num</label><input type="text" name="volume" value={metadata.volume} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Páginas</label><input type="text" name="pages" value={metadata.pages} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {metadata.docType === 'site' && (
+                                        <>
+                                            <div><label className="text-[10px] font-semibold text-gray-500 uppercase">URL do Site</label><input type="text" name="url" value={metadata.url} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            <div className="grid grid-cols-2 gap-2">
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Data de Acesso</label><input type="text" name="accessDate" value={metadata.accessDate} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                                <div><label className="text-[10px] font-semibold text-gray-500 uppercase">Ano Publicação</label><input type="text" name="year" value={metadata.year} onChange={handleMetadataChange} className="w-full border border-gray-300 rounded p-1.5 text-sm" /></div>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+
+                                <label className="flex flex-col items-center p-4 border-2 border-indigo-300 border-dashed rounded-lg cursor-pointer bg-white hover:bg-indigo-50 transition group">
+                                    <i className="fas fa-file-pdf text-3xl text-indigo-400 group-hover:text-indigo-600 mb-2 transition"></i>
+                                    <span className="text-sm text-gray-800 font-bold">Carregar arquivo PDF</span>
+                                    <input type="file" accept="application/pdf" className="hidden" onChange={handleFileUpload} />
+                                    {fileName && <span className="mt-2 text-xs text-center text-green-700 font-bold bg-green-50 p-1 rounded-md border border-green-200 w-full truncate">{fileName}</span>}
+                                </label>
+                            </div>
+                            
+                            {/* PAINEL DE EXPORTAÇÃO FIXO */}
+                            <div className="bg-slate-900 border-t-4 border-indigo-600 shrink-0 shadow-[0_-10px_15px_-3px_rgba(0,0,0,0.1)]">
+                                <div className="bg-slate-800 p-2 text-center flex justify-between items-center px-4">
+                                    <h3 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider">
+                                        <i className="fas fa-save mr-1"></i> Exportar Fichamento
+                                    </h3>
+                                    <span className="text-[10px] text-indigo-300 bg-indigo-900 px-2 py-0.5 rounded">{highlights.length} Citações</span>
+                                </div>
+                                <div className="p-3">
+                                    <div className="grid grid-cols-3 gap-2 mb-2">
+                                        <button onClick={downloadMD} className="flex flex-col items-center justify-center bg-slate-700 hover:bg-indigo-600 p-2 rounded transition text-white shadow-sm">
+                                            <i className="fab fa-markdown text-lg mb-1"></i>
+                                            <span className="text-[10px] font-bold">.MD</span>
+                                        </button>
+                                        <button onClick={downloadTXT} className="flex flex-col items-center justify-center bg-slate-700 hover:bg-emerald-600 p-2 rounded transition text-white shadow-sm">
+                                            <i className="fas fa-file-alt text-lg mb-1"></i>
+                                            <span className="text-[10px] font-bold">.TXT</span>
+                                        </button>
+                                        <button onClick={downloadPDF} disabled={isExportingPDF} className="flex flex-col items-center justify-center bg-slate-700 hover:bg-red-600 p-2 rounded transition text-white shadow-sm disabled:opacity-50">
+                                            {isExportingPDF ? <i className="fas fa-circle-notch fa-spin text-lg mb-1"></i> : <i className="fas fa-file-pdf text-lg mb-1"></i>}
+                                            <span className="text-[10px] font-bold">.PDF</span>
+                                        </button>
+                                    </div>
+                                    <div className="h-24 min-h-[4rem] max-h-[50vh] resize-y overflow-auto custom-scroll bg-slate-950 p-2 rounded border border-slate-800">
+                                        <pre className="text-[9px] text-slate-400 whitespace-pre-wrap font-mono leading-relaxed" 
+                                             dangerouslySetInnerHTML={{__html: getMarkdownPreview().replace(/\*\*(.*?)\*\*/g, '<strong class="text-slate-200">$1</strong>')}}>
+                                        </pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* PAINEL DIREITO: Leitura */}
+                        <div className="w-full md:w-3/5 flex flex-col bg-[#f8fafc] h-full relative">
+                            <div className="bg-white border-b border-gray-300 p-3 flex flex-col sm:flex-row justify-between items-center gap-3 z-20 shadow-sm shrink-0">
+                                <div className="flex-1 w-full flex items-center bg-gray-50 px-3 py-2 rounded border border-gray-200">
+                                    <i className="fas fa-file-pdf text-red-500 mr-3 text-lg"></i>
+                                    <input type="range" min="1" max={pdfPages.length > 0 ? pdfPages.length : 1} value={currentPage} onChange={handleSliderChange} disabled={pdfPages.length === 0} className="w-full h-1.5 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                                    <div className="flex items-center text-xs font-bold text-gray-700 ml-3 whitespace-nowrap">
+                                        Pág. 
+                                        <input type="number" value={pageInputValue} onChange={handlePageInputChange} onBlur={submitPageInput} onKeyDown={handlePageInputKeyDown} disabled={pdfPages.length === 0} className="w-12 mx-1 text-center bg-white border border-indigo-300 text-indigo-700 rounded py-0.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-bold transition-all" title="Digite o número e pressione Enter" /> 
+                                        <span className="text-gray-400">/ {pdfPages.length || 0}</span>
+                                    </div>
+                                </div>
+                                <button onClick={captureHighlight} className="w-full sm:w-auto bg-green-600 hover:bg-green-700 text-white px-5 py-2.5 rounded-md text-sm font-bold transition shadow flex items-center justify-center shrink-0">
+                                    <i className="fas fa-highlighter mr-2"></i> Capturar Texto
+                                </button>
+                            </div>
+
+                            <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scroll relative bg-[#e5e5f7]" style={{backgroundImage: 'radial-gradient(#cbd5e1 1px, transparent 1px)', backgroundSize: '20px 20px'}}>
+                                {isProcessing ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-indigo-800"><i className="fas fa-cog fa-spin text-5xl mb-4"></i><p className="font-bold text-lg bg-white px-6 py-3 rounded-full shadow-md border border-gray-100">A ler as páginas do documento...</p></div>
+                                ) : pdfPages.length > 0 ? (
+                                    <div className="space-y-6 max-w-2xl mx-auto pb-10">
+                                        {pdfPages.map(page => (
+                                            <div key={page.pageNumber} id={`pdf-page-${page.pageNumber}`} data-page={page.pageNumber} className="pdf-page-container bg-white p-8 shadow-lg border border-gray-200 text-gray-800 text-[15px] leading-relaxed relative rounded-sm selection:bg-yellow-200 selection:text-black">
+                                                <div className="absolute top-0 right-0 bg-gray-100 border-b border-l border-gray-200 px-3 py-1 text-xs font-bold text-gray-500 rounded-bl-lg select-none">Página {page.pageNumber}</div>
+                                                {page.text}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-full text-gray-400"><i className="fas fa-arrow-left text-4xl mb-4 text-indigo-300"></i><p className="text-sm font-medium bg-white px-4 py-2 rounded shadow-sm">Preencha os metadados e carregue um PDF para começar.</p></div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const container = document.getElementById('fichador-app-root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>
